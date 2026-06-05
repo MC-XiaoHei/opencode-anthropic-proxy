@@ -511,6 +511,27 @@ function handleHealth(): Response {
   return corsResponse({ status: "ok", service: "opencode-anthropic-proxy" });
 }
 
+// ---- /v1/models ----
+
+function handleModels(env: Env): Response {
+  const targetModel = env.TARGET_MODEL || DEFAULT_TARGET_MODEL;
+  const allowedModels = env.ALLOWED_MODELS?.split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+  const models =
+    allowedModels && allowedModels.length > 0 ? allowedModels : [targetModel];
+
+  return corsResponse({
+    data: models.map((id) => ({
+      type: "model",
+      id,
+      display_name: id,
+      created_at: "2025-01-01T00:00:00Z",
+    })),
+  });
+}
+
 // ---- /v1/messages ----
 
 async function handleMessages(request: Request, env: Env): Promise<Response> {
@@ -667,6 +688,9 @@ export default {
     switch (true) {
       case request.method === "GET" && url.pathname === "/health":
         return handleHealth();
+
+      case request.method === "GET" && url.pathname === "/v1/models":
+        return handleModels(env);
 
       case request.method === "POST" && url.pathname === "/v1/messages":
         return handleMessages(request, env);
