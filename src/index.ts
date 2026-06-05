@@ -75,7 +75,7 @@ interface OpenAIRequest {
 
 interface OpenAIChoice {
   index: number;
-  message: { role: string; content: string };
+  message: { role: string; content: string; reasoning_content?: string };
   finish_reason: string | null;
 }
 
@@ -101,7 +101,7 @@ interface OpenAIStreamChunk {
   model: string;
   choices: {
     index: number;
-    delta: { role?: string; content?: string };
+    delta: { role?: string; content?: string; reasoning_content?: string };
     finish_reason: string | null;
   }[];
   usage?: OpenAIUsage;
@@ -181,6 +181,15 @@ function convertAnthropicToOpenAI(
 
 // ---- 格式转换：OpenAI → Anthropic（非流式） ----
 
+function getDisplayText(msg: {
+  content?: string;
+  reasoning_content?: string;
+}): string {
+  if (msg.content) return msg.content;
+  if (msg.reasoning_content) return msg.reasoning_content;
+  return "";
+}
+
 function convertOpenAIToAnthropic(
   oaiResp: OpenAIResponse,
   requestModel: string,
@@ -197,7 +206,7 @@ function convertOpenAIToAnthropic(
     id: `msg_${uuid()}`,
     type: "message",
     role: "assistant",
-    content: [{ type: "text", text: choice?.message?.content ?? "" }],
+    content: [{ type: "text", text: getDisplayText(choice?.message ?? {}) }],
     model: requestModel,
     stop_reason: stopReason,
     stop_sequence: null,
@@ -250,6 +259,8 @@ function createAnthropicStream(
 
             const delta = chunk.choices?.[0]?.delta;
             const finishReason = chunk.choices?.[0]?.finish_reason;
+            const deltaContent =
+              delta?.content || delta?.reasoning_content || "";
 
             // 保存 usage 信息（可能在最后一个 chunk 中）
             if (chunk.usage) {
@@ -281,7 +292,7 @@ function createAnthropicStream(
             }
 
             // 发送 content_block_start（在第一个内容 delta 之前）
-            if (delta?.content && !hasContentBlockStarted) {
+            if (deltaContent && !hasContentBlockStarted) {
               const blockStart = {
                 type: "content_block_start",
                 index: 0,
@@ -294,11 +305,11 @@ function createAnthropicStream(
             }
 
             // 发送 content_block_delta
-            if (delta?.content) {
+            if (deltaContent) {
               const contentDelta = {
                 type: "content_block_delta",
                 index: 0,
-                delta: { type: "text_delta", text: delta.content },
+                delta: { type: "text_delta", text: deltaContent },
               };
               controller.enqueue(
                 encoder.encode(`data: ${JSON.stringify(contentDelta)}\n\n`),
@@ -361,25 +372,31 @@ function createAnthropicStream(
               try {
                 const chunk = JSON.parse(data);
                 const delta = chunk.choices?.[0]?.delta;
-                if (delta?.content && !hasContentBlockStarted) {
+                const bufContent =
+                  delta?.content || delta?.reasoning_content || "";
+                if (bufContent && !hasContentBlockStarted) {
                   const blockStart = {
                     type: "content_block_start",
                     index: 0,
                     content_block: { type: "text", text: "" },
                   };
                   controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify(blockStart)}\n\n`),
+                    encoder.encode(`data: ${JSON.stringify(blockStart)}
+
+`),
                   );
                   hasContentBlockStarted = true;
                 }
-                if (delta?.content) {
+                if (bufContent) {
                   const contentDelta = {
                     type: "content_block_delta",
                     index: 0,
-                    delta: { type: "text_delta", text: delta.content },
+                    delta: { type: "text_delta", text: bufContent },
                   };
                   controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify(contentDelta)}\n\n`),
+                    encoder.encode(`data: ${JSON.stringify(contentDelta)}
+
+`),
                   );
                 }
               } catch {
