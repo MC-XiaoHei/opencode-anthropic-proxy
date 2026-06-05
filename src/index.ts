@@ -486,7 +486,7 @@ function corsResponse(body: unknown, status = 200): Response {
     status,
     headers: {
       ...CORS_HEADERS,
-      "Content-Type": "application/json",
+      "Content-Type": "application/json; charset=utf-8",
     },
   });
 }
@@ -618,7 +618,7 @@ async function handleMessages(request: Request, env: Env): Promise<Response> {
           status: 200,
           headers: {
             ...CORS_HEADERS,
-            "Content-Type": "text/event-stream",
+            "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
             "x-request-id": `req_${uuid()}`,
@@ -635,7 +635,7 @@ async function handleMessages(request: Request, env: Env): Promise<Response> {
       status: 200,
       headers: {
         ...CORS_HEADERS,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         "x-request-id": `req_${uuid()}`,
       },
     });
@@ -682,7 +682,10 @@ export default {
           }),
           {
             status: 404,
-            headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+            headers: {
+              ...CORS_HEADERS,
+              "Content-Type": "application/json; charset=utf-8",
+            },
           },
         );
     }
