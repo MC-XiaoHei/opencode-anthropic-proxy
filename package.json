@@ -9,6 +9,13 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "workerd"
+    ]
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241230.0",
     "typescript": "^5.6.0",
