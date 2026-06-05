@@ -47,11 +47,15 @@ interface AnthropicUsage {
   output_tokens: number;
 }
 
+type AnthropicContentBlock =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string };
+
 interface AnthropicResponse {
   id: string;
   type: "message";
   role: "assistant";
-  content: { type: "text"; text: string }[];
+  content: AnthropicContentBlock[];
   model: string;
   stop_reason: string | null;
   stop_sequence: string | null;
@@ -181,13 +185,16 @@ function convertAnthropicToOpenAI(
 
 // ---- 格式转换：OpenAI → Anthropic（非流式） ----
 
-function getDisplayText(msg: {
+function buildContent(msg: {
   content?: string;
   reasoning_content?: string;
-}): string {
-  if (msg.content) return msg.content;
-  if (msg.reasoning_content) return msg.reasoning_content;
-  return "";
+}): AnthropicContentBlock[] {
+  const blocks: AnthropicContentBlock[] = [];
+  if (msg.reasoning_content) {
+    blocks.push({ type: "thinking", thinking: msg.reasoning_content });
+  }
+  blocks.push({ type: "text", text: msg.content || "" });
+  return blocks;
 }
 
 function convertOpenAIToAnthropic(
@@ -206,7 +213,7 @@ function convertOpenAIToAnthropic(
     id: `msg_${uuid()}`,
     type: "message",
     role: "assistant",
-    content: [{ type: "text", text: getDisplayText(choice?.message ?? {}) }],
+    content: buildContent(choice?.message ?? {}),
     model: requestModel,
     stop_reason: stopReason,
     stop_sequence: null,
@@ -219,20 +226,109 @@ function convertOpenAIToAnthropic(
 
 // ---- 流式转换（OpenAI SSE → Anthropic SSE） ----
 
+type StreamState = "idle" | "thinking" | "text";
+
 function createAnthropicStream(
   openaiStream: ReadableStream<Uint8Array>,
   requestModel: string,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  let isFirstChunk = true;
-  let hasContentBlockStarted = false;
+  let state: StreamState = "idle";
+  let sentMessageStart = false;
   let pendingUsage: OpenAIUsage | null = null;
+  const blockIds = { thinking: 0, text: 1 };
+
+  function send(controller: ReadableStreamDefaultController, obj: unknown) {
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+  }
+
+  function sendMessageStart(
+    controller: ReadableStreamDefaultController,
+    model: string,
+  ) {
+    if (sentMessageStart) return;
+    send(controller, {
+      type: "message_start",
+      message: {
+        id: `msg_${uuid()}`,
+        type: "message",
+        role: "assistant",
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: pendingUsage?.prompt_tokens ?? 0,
+          output_tokens: 0,
+        },
+      },
+    });
+    sentMessageStart = true;
+  }
+
+  function ensureInBlock(
+    controller: ReadableStreamDefaultController,
+    target: "thinking" | "text",
+  ) {
+    if (state === target) return;
+    // 关闭当前 block
+    if (state === "thinking") {
+      send(controller, {
+        type: "content_block_stop",
+        index: blockIds.thinking,
+      });
+    } else if (state === "text") {
+      send(controller, { type: "content_block_stop", index: blockIds.text });
+    }
+    // 开启新 block
+    state = target;
+    send(controller, {
+      type: "content_block_start",
+      index: blockIds[target],
+      content_block:
+        target === "thinking"
+          ? { type: "thinking", thinking: "" }
+          : { type: "text", text: "" },
+    });
+  }
+
+  function closeAllBlocks(controller: ReadableStreamDefaultController) {
+    if (state === "thinking") {
+      send(controller, {
+        type: "content_block_stop",
+        index: blockIds.thinking,
+      });
+    } else if (state === "text") {
+      send(controller, { type: "content_block_stop", index: blockIds.text });
+    }
+    state = "idle";
+  }
+
+  function sendFinishEvents(
+    controller: ReadableStreamDefaultController,
+    finishReason: string,
+  ) {
+    const stopReason =
+      finishReason === "stop"
+        ? "end_turn"
+        : finishReason === "length"
+          ? "max_tokens"
+          : finishReason;
+
+    send(controller, {
+      type: "message_delta",
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: pendingUsage?.completion_tokens ?? 0 },
+    });
+    send(controller, { type: "message_stop" });
+  }
 
   return new ReadableStream({
     async start(controller) {
       const reader = openaiStream.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let streamFinished = false;
 
       try {
         while (true) {
@@ -259,111 +355,49 @@ function createAnthropicStream(
 
             const delta = chunk.choices?.[0]?.delta;
             const finishReason = chunk.choices?.[0]?.finish_reason;
-            const deltaContent =
-              delta?.content || delta?.reasoning_content || "";
+            const reasoning = delta?.reasoning_content;
+            const content = delta?.content;
 
-            // 保存 usage 信息（可能在最后一个 chunk 中）
+            // 保存 usage
             if (chunk.usage) {
               pendingUsage = chunk.usage;
             }
 
-            if (isFirstChunk) {
-              // 发送 message_start
-              const messageStart = {
-                type: "message_start",
-                message: {
-                  id: `msg_${uuid()}`,
-                  type: "message",
-                  role: "assistant",
-                  content: [],
-                  model: requestModel,
-                  stop_reason: null,
-                  stop_sequence: null,
-                  usage: {
-                    input_tokens: pendingUsage?.prompt_tokens ?? 0,
-                    output_tokens: 0,
-                  },
-                },
-              };
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(messageStart)}\n\n`),
-              );
-              isFirstChunk = false;
+            // 确保已发送 message_start
+            if (!sentMessageStart) {
+              sendMessageStart(controller, requestModel);
             }
 
-            // 发送 content_block_start（在第一个内容 delta 之前）
-            if (deltaContent && !hasContentBlockStarted) {
-              const blockStart = {
-                type: "content_block_start",
-                index: 0,
-                content_block: { type: "text", text: "" },
-              };
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(blockStart)}\n\n`),
-              );
-              hasContentBlockStarted = true;
-            }
-
-            // 发送 content_block_delta
-            if (deltaContent) {
-              const contentDelta = {
+            // --- reasoning → thinking block ---
+            if (reasoning) {
+              ensureInBlock(controller, "thinking");
+              send(controller, {
                 type: "content_block_delta",
-                index: 0,
-                delta: { type: "text_delta", text: deltaContent },
-              };
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(contentDelta)}\n\n`),
-              );
+                index: blockIds.thinking,
+                delta: { type: "thinking_delta", thinking: reasoning },
+              });
             }
 
-            // 处理结束
+            // --- content → text block ---
+            if (content) {
+              ensureInBlock(controller, "text");
+              send(controller, {
+                type: "content_block_delta",
+                index: blockIds.text,
+                delta: { type: "text_delta", text: content },
+              });
+            }
+
+            // --- finish ---
             if (finishReason) {
-              // 如果之前没有内容块开始，发送一个空的 content_block_start
-              if (!hasContentBlockStarted) {
-                const blockStart = {
-                  type: "content_block_start",
-                  index: 0,
-                  content_block: { type: "text", text: "" },
-                };
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify(blockStart)}\n\n`),
-                );
-              }
-
-              // content_block_stop
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
-                ),
-              );
-
-              // message_delta
-              const stopReason =
-                finishReason === "stop"
-                  ? "end_turn"
-                  : finishReason === "length"
-                    ? "max_tokens"
-                    : finishReason;
-              const messageDelta = {
-                type: "message_delta",
-                delta: { stop_reason: stopReason, stop_sequence: null },
-                usage: { output_tokens: pendingUsage?.completion_tokens ?? 0 },
-              };
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(messageDelta)}\n\n`),
-              );
-
-              // message_stop
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({ type: "message_stop" })}\n\n`,
-                ),
-              );
+              closeAllBlocks(controller);
+              sendFinishEvents(controller, finishReason);
+              streamFinished = true;
             }
           }
         }
 
-        // 处理缓冲区中剩余的内容
+        // 处理缓冲区剩余内容
         if (buffer.trim()) {
           const trimmed = buffer.trim();
           if (trimmed.startsWith("data: ")) {
@@ -372,32 +406,27 @@ function createAnthropicStream(
               try {
                 const chunk = JSON.parse(data);
                 const delta = chunk.choices?.[0]?.delta;
-                const bufContent =
-                  delta?.content || delta?.reasoning_content || "";
-                if (bufContent && !hasContentBlockStarted) {
-                  const blockStart = {
-                    type: "content_block_start",
-                    index: 0,
-                    content_block: { type: "text", text: "" },
-                  };
-                  controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify(blockStart)}
+                const reasoning = delta?.reasoning_content;
+                const content = delta?.content;
 
-`),
-                  );
-                  hasContentBlockStarted = true;
+                if (!sentMessageStart) {
+                  sendMessageStart(controller, requestModel);
                 }
-                if (bufContent) {
-                  const contentDelta = {
+                if (reasoning) {
+                  ensureInBlock(controller, "thinking");
+                  send(controller, {
                     type: "content_block_delta",
-                    index: 0,
-                    delta: { type: "text_delta", text: bufContent },
-                  };
-                  controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify(contentDelta)}
-
-`),
-                  );
+                    index: blockIds.thinking,
+                    delta: { type: "thinking_delta", thinking: reasoning },
+                  });
+                }
+                if (content) {
+                  ensureInBlock(controller, "text");
+                  send(controller, {
+                    type: "content_block_delta",
+                    index: blockIds.text,
+                    delta: { type: "text_delta", text: content },
+                  });
                 }
               } catch {
                 // ignore
@@ -406,67 +435,26 @@ function createAnthropicStream(
           }
         }
 
-        // 流结束但未收到 finish_reason —— 补充关闭事件
-        if (isFirstChunk) {
-          // 没有任何 chunk 就结束了
-          const messageStart = {
-            type: "message_start",
-            message: {
-              id: `msg_${uuid()}`,
-              type: "message",
-              role: "assistant",
-              content: [],
-              model: requestModel,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 0, output_tokens: 0 },
-            },
-          };
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(messageStart)}\n\n`),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "message_stop" })}\n\n`,
-            ),
-          );
-        } else if (!hasContentBlockStarted) {
-          // 只有 message_start 没有内容
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } })}\n\n`,
-            ),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "message_stop" })}\n\n`,
-            ),
-          );
+        // 流结束但未收到 finish_reason
+        if (!streamFinished) {
+          if (!sentMessageStart) {
+            sendMessageStart(controller, requestModel);
+          }
+          // 至少发一个空的 text block
+          if (state === "idle") {
+            send(controller, {
+              type: "content_block_start",
+              index: blockIds.text,
+              content_block: { type: "text", text: "" },
+            });
+            send(controller, {
+              type: "content_block_stop",
+              index: blockIds.text,
+            });
+          } else {
+            closeAllBlocks(controller);
+          }
+          sendFinishEvents(controller, "end_turn");
         }
 
         controller.close();
