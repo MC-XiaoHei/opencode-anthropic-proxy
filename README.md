@@ -69,7 +69,7 @@ npm run deploy
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | `OPENCODE_API_KEY` | ✅ | — | OpenCode API 密钥 |
-| `OPENCODE_BASE_URL` | ❌ | `https://api.opencode.ai/v1` | OpenCode API 基础地址 |
+| `OPENCODE_BASE_URL` | ❌ | `https://opencode.ai/zen/go/v1` | OpenCode Go 套餐 API 基础地址 |
 | `TARGET_MODEL` | ❌ | `deepseek-v4-flash` | 实际调用的模型名称 |
 | `ALLOWED_MODELS` | ❌ | 全部允许 | 允许的 Anthropic 模型名列表（逗号分隔） |
 | `ANTHROPIC_VERSION` | ❌ | `2023-06-01` | Anthropic API 版本头 |

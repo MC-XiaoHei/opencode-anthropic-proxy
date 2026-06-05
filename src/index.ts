@@ -109,7 +109,7 @@ interface OpenAIStreamChunk {
 
 // ---- 常量 ----
 
-const DEFAULT_OPENCODE_BASE_URL = "https://api.opencode.ai/v1";
+const DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1";
 const DEFAULT_TARGET_MODEL = "deepseek-v4-flash";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
