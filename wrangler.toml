@@ -1,0 +1,19 @@
+name = "opencode-anthropic-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+[[env.staging]]
+name = "opencode-anthropic-proxy-staging"
+
+# ============================================================
+# 环境变量（敏感信息请使用 wrangler secret 设置）
+# ============================================================
+# 必需：OpenCode API Key
+# 设置方式：wrangler secret put OPENCODE_API_KEY
+#
+# 可选：自定义配置
+# [vars]
+# OPENCODE_BASE_URL = "https://api.opencode.ai/v1"
+# TARGET_MODEL = "deepseek-v4-flash"
+# ALLOWED_MODELS = "claude-sonnet-4-20250514,claude-3.5-sonnet,claude-opus-4"

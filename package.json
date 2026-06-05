@@ -1,0 +1,16 @@
+{
+  "name": "opencode-anthropic-proxy",
+  "version": "1.0.0",
+  "description": "将 OpenCode Go 套餐的 DeepSeek V4 Flash API 反向代理为 Anthropic Messages API 格式",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241230.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.95.0"
+  }
+}
