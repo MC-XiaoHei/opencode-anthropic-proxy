@@ -1,8 +1,10 @@
 # OpenCode Anthropic Proxy
 
-将 **OpenCode Go 套餐** 的 DeepSeek V4 Flash API 反向代理为 **Anthropic Messages API 格式**。
+将 **OpenAI 兼容 API** 反向代理为 **Anthropic Messages API 格式**。
 
-让你可以在任何支持 Anthropic API 的客户端（如 Claude Code、Continue.dev、Cline 等）中，直接使用 OpenCode Go 套餐的 DeepSeek V4 Flash 模型。
+默认配置指向 OpenCode Go 套餐的 DeepSeek V4 Flash，但你可以通过环境变量接入任何 OpenAI 兼容的 API。
+
+让你可以在任何支持 Anthropic API 的客户端（如 Claude Code、Cline、Continue 等）中，使用非 Anthropic 的模型。
 
 ## 工作原理
 
@@ -12,28 +14,47 @@ flowchart LR
     Proxy[本代理<br/>Cloudflare Workers]
     OpenCode[OpenCode API<br/>OpenAI 格式]
     
-    Client -- "POST /v1/messages<br/>Anthropic 格式" --> Proxy
-    Proxy -- "POST /v1/chat/completions<br/>OpenAI 格式" --> OpenCode
+    Client -- "x-api-key: sk-xxx<br/>(你的 OpenCode Key)" --> Proxy
+    Proxy -- "Authorization: Bearer sk-xxx<br/>(原样透传)" --> OpenCode
     OpenCode -- "响应 / SSE 流" --> Proxy
     Proxy -- "响应 / SSE 流<br/>Anthropic 格式" --> Client
 ```
 
-**请求转换：**
-- `system` 参数 → `messages[0].role = "system"`
-- `messages[].content`（字符串或数组）→ 提取纯文本
-- 任意 Anthropic 模型名 → 统一映射为 `deepseek-v4-flash`
-- `stop_sequences` → `stop`
+**关键设计：API Key 透传。** 客户端请求中携带的 `x-api-key` 或 `Authorization` 头会被直接转发到 OpenCode API，不在 Worker 中存储任何密钥。
 
-**响应转换：**
-- OpenAI `choices[0].message.content` → Anthropic `content[0].text`
-- `finish_reason: "stop"` → `stop_reason: "end_turn"`
-- `finish_reason: "length"` → `stop_reason: "max_tokens"`
-- `usage.prompt_tokens` → `usage.input_tokens`
-- `usage.completion_tokens` → `usage.output_tokens`
+### 请求转换（Anthropic → OpenAI）
 
-**流式转换（SSE）：**
-- OpenAI `data: {"choices":[{"delta":{"content":"..."}}]}` → Anthropic `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}`
-- 自动生成 `message_start`、`content_block_start/stop`、`message_delta/stop` 事件
+| Anthropic | OpenAI |
+|---|---|
+| `system` 参数 | `messages[0].role = "system"` |
+| `messages[].content`（字符串或数组） | 提取纯文本 |
+| 任意模型名 | 统一映射为 `TARGET_MODEL`（默认 `deepseek-v4-flash`） |
+| `stop_sequences` | `stop` |
+| `stream: true/false` | 透传 |
+
+### 响应转换（OpenAI → Anthropic）
+
+| OpenAI | Anthropic |
+|---|---|
+| `choices[0].message.reasoning_content` | `content[0]: {type: "thinking", thinking: "..."}` |
+| `choices[0].message.content` | `content[1]: {type: "text", text: "..."}` |
+| `finish_reason: "stop"` | `stop_reason: "end_turn"` |
+| `finish_reason: "length"` | `stop_reason: "max_tokens"` |
+| `usage.prompt_tokens` / `completion_tokens` | `usage.input_tokens` / `output_tokens` |
+
+思考和输出分别映射为 Anthropic 的 `thinking` 和 `text` 内容块，客户端可以分开展示。
+
+### 流式 SSE 转换
+
+```
+OpenAI:  data: {"choices":[{"delta":{"reasoning_content":"..."}}]}
+Anthropic: data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"..."}}
+
+OpenAI:  data: {"choices":[{"delta":{"content":"..."}}]}
+Anthropic: data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"..."}}
+```
+
+自动生成 `message_start`、`content_block_start/stop`、`message_delta/stop` 等完整事件序列。
 
 ## 部署
 
@@ -50,68 +71,80 @@ flowchart LR
 # 1. 安装依赖
 npm install
 
-# 2. 配置 OpenCode API Key（敏感信息，用 secret 设置）
-wrangler secret put OPENCODE_API_KEY
-# 然后输入你的 OpenCode API Key
-
-# 3. 可选：配置其他环境变量
-# wrangler secret put OPENCODE_BASE_URL  # 默认 https://api.opencode.ai/v1
-
-# 4. 部署
+# 2. 部署
 npm run deploy
 
-# 5. 查看部署 URL
+# 3. 查看部署 URL
 # 输出类似: https://opencode-anthropic-proxy.xxx.workers.dev
 ```
 
-### 环境变量
+> 无需配置任何环境变量，API Key 由客户端透传。
 
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `OPENCODE_API_KEY` | ✅ | — | OpenCode API 密钥 |
-| `OPENCODE_BASE_URL` | ❌ | `https://opencode.ai/zen/go/v1` | OpenCode Go 套餐 API 基础地址 |
-| `TARGET_MODEL` | ❌ | `deepseek-v4-flash` | 实际调用的模型名称 |
-| `ALLOWED_MODELS` | ❌ | 全部允许 | 允许的 Anthropic 模型名列表（逗号分隔） |
-| `ANTHROPIC_VERSION` | ❌ | `2023-06-01` | Anthropic API 版本头 |
+### Cloudflare Dashboard 构建配置
+
+如果使用 Cloudflare Workers Dashboard 的 Git 集成自动部署，按以下配置：
+
+| 字段 | 值 |
+|------|-----|
+| 构建命令 | `pnpm build` |
+| 部署命令 | 留空 |
+| 根目录 | `/` |
+
+### 可选环境变量
+
+在 `wrangler.toml` 的 `[vars]` 中设置，或通过 Cloudflare Dashboard 配置：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OPENCODE_BASE_URL` | `https://opencode.ai/zen/go/v1` | OpenCode Go 套餐 API 地址 |
+| `TARGET_MODEL` | `deepseek-v4-flash` | 实际调用的模型名 |
+| `ALLOWED_MODELS` | 全部允许 | 限制客户端可用的模型名（逗号分隔） |
 
 ### 本地开发
 
 ```bash
-# 启动本地开发服务器（默认 http://localhost:8787）
 npm run dev
 ```
 
+## API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 健康检查 |
+| `GET` | `/v1/models` | 列出可用模型 |
+| `POST` | `/v1/messages` | 聊天补全（支持流式） |
+
 ## 使用
 
-部署后，将客户端的 Anthropic API Base URL 指向你的 Worker 地址，并使用任意 API Key（本代理不校验 API Key，但需要传一个值）。
+将客户端的 Anthropic API Base URL 指向你的 Worker 地址，**API Key 填写你的 OpenCode API Key**。
 
 ### curl 示例
 
-**非流式请求：**
+**非流式：**
 
 ```bash
 curl https://your-worker.xxx.workers.dev/v1/messages \
   -H "Content-Type: application/json" \
-  -H "x-api-key: sk-not-used" \
+  -H "x-api-key: 你的 OpenCode API Key" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "deepseek-v4-flash",
     "max_tokens": 1024,
     "messages": [
-      {"role": "user", "content": "你好，请用中文回答：1+1=?"}
+      {"role": "user", "content": "你好"}
     ]
   }'
 ```
 
-**流式请求：**
+**流式：**
 
 ```bash
 curl https://your-worker.xxx.workers.dev/v1/messages \
   -H "Content-Type: application/json" \
-  -H "x-api-key: sk-not-used" \
+  -H "x-api-key: 你的 OpenCode API Key" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "deepseek-v4-flash",
     "max_tokens": 1024,
     "stream": true,
     "messages": [
@@ -120,23 +153,25 @@ curl https://your-worker.xxx.workers.dev/v1/messages \
   }'
 ```
 
-### 在 Cursor/Claude Code/Cline 中使用
+**查看可用模型：**
 
-将 Anthropic API Base URL 配置为：
-
-```
-https://your-worker.xxx.workers.dev
+```bash
+curl https://your-worker.xxx.workers.dev/v1/models
 ```
 
-API Key 随意填写（例如 `sk-not-used`），模型名填写任意支持的 Anthropic 模型名（如 `claude-sonnet-4-20250514`）。
+### 在 Claude Code / Cline / Continue 中使用
 
-> **注意**：当前已经配置了 `ALLOWED_MODELS` 时，请使用列表中的模型名。
+| 配置项 | 值 |
+|--------|-----|
+| API Base URL | `https://your-worker.xxx.workers.dev` |
+| API Key | **你的 OpenCode API Key** |
+| 模型名 | `deepseek-v4-flash`（或任意值，会被映射） |
 
 ## 健康检查
 
 ```bash
 curl https://your-worker.xxx.workers.dev/health
-# 返回: {"status":"ok","service":"opencode-anthropic-proxy"}
+# {"status":"ok","service":"opencode-anthropic-proxy"}
 ```
 
 ## 项目结构
@@ -156,7 +191,7 @@ opencode-anthropic-proxy/
 
 - **Runtime:** Cloudflare Workers（ES Modules）
 - **语言:** TypeScript
-- **部署:** Wrangler CLI
+- **客户端:** Wrangler CLI
 
 ## 许可证
 
