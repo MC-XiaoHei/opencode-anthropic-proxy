@@ -7,7 +7,6 @@
 // ---- 类型定义 ----
 
 interface Env {
-  OPENCODE_API_KEY: string;
   OPENCODE_BASE_URL?: string;
   TARGET_MODEL?: string;
   ALLOWED_MODELS?: string;
@@ -540,14 +539,21 @@ async function handleMessages(request: Request, env: Env): Promise<Response> {
   const targetModel = env.TARGET_MODEL || DEFAULT_TARGET_MODEL;
   const requestModel = body.model;
 
-  // 5. 转换为 OpenAI 格式
-  const openaiReq = convertAnthropicToOpenAI(body, targetModel);
-
-  // 6. 调用 OpenCode API
-  const opencodeApiKey = env.OPENCODE_API_KEY;
+  // 5. 从请求头提取 API Key（透传模式）
+  const authHeader = request.headers.get("Authorization") || "";
+  const apiKeyHeader = request.headers.get("x-api-key") || "";
+  const opencodeApiKey = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : apiKeyHeader;
   if (!opencodeApiKey) {
-    return errorResponse("OPENCODE_API_KEY is not configured", 500);
+    return errorResponse(
+      "Missing API key. Provide x-api-key or Authorization: Bearer header",
+      401,
+    );
   }
+
+  // 6. 转换为 OpenAI 格式
+  const openaiReq = convertAnthropicToOpenAI(body, targetModel);
 
   const controller = new AbortController();
   // 设置超时（5 分钟）
