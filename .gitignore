@@ -3,3 +3,7 @@ dist/
 .wrangler/
 *.log
 .env
+*.json
+!package.json
+!tsconfig.json
+!pnpm-lock.yaml
